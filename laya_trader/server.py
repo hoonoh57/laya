@@ -1,6 +1,4 @@
-
-**laya_trader\server.py**
-```python
+﻿
 import contextlib
 import logging
 import os

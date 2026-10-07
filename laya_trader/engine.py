@@ -87,14 +87,17 @@ class Engine:
         await self.cybos.stop()
 
     async def _load_laya(self):
-        try:
+        def _make():
             from src.laya_gate import LayaGate
-            self.gate = await asyncio.to_thread(LayaGate, self.cfg["laya"])
+            return LayaGate(self.cfg["laya"])
+        try:
+            self.gate = await asyncio.to_thread(_make)
             self.status["laya"] = "ready"
         except Exception as e:
             self.status["laya"] = f"error: {e}"
             log.exception("Laya load")
         await self.push_status()
+
 
     # ---------- 키움 ----------
     async def start_kiwoom(self):
@@ -271,9 +274,12 @@ class Engine:
             try:
                 await self._subscribe_ob(self.orderbook_code)
             except Exception as e:
-                await self.log_once("ob", f"호가 구독 실패: {e}") if changed: await self.push_status()
+                await self.log_once("ob", f"호가 구독 실패: {e}")
+        if changed:
+            await self.push_status()
 
-Copyasync def _cybos_watch(self):
+
+async def _cybos_watch(self):
     while True:
         await asyncio.sleep(10)
         if self.cybos.connected:
