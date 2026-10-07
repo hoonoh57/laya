@@ -92,6 +92,8 @@ def orderbook_features(ob):
 
 def peer_features(code, rows):
     rows = [r for r in rows or [] if r.get("price")]
+    if rows and not any((r.get("value") or 0) for r in rows):
+        return {"peer_n": len(rows), "peer_stale": True}   # 장후 시세 초기화(거래대금 전부 0)
     me = next((r for r in rows if r["code"] == code), None)
     if not me or len(rows) < 2:
         return {"peer_n": len(rows)}

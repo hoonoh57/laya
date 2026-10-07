@@ -15,3 +15,4 @@ run/
 *.key
 *.bak*
 *.bak*
+data/*.db*
