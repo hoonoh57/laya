@@ -1,0 +1,219 @@
+﻿<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>Laya Chart</title>
+<style>
+body{margin:0;background:#131722;color:#d1d4dc;font:13px "Malgun Gothic",sans-serif}
+.row{height:32px;padding:0 8px;display:flex;gap:6px;align-items:center;border-bottom:1px solid #2a2e39}
+#c{position:absolute;top:66px;bottom:0;left:0;right:0}
+input,select,button{background:#1e222d;color:#d1d4dc;border:1px solid #363a45;padding:2px 5px}
+input.n{width:44px}
+button:disabled{opacity:.4}
+#info{margin-left:auto;color:#9598a1}#err{color:#f23645}#chk{font-weight:bold;margin-left:8px}
+#leg{margin-left:auto;color:#b2b5be}
+</style>
+<script src="/vendor/lightweight-charts-5.2.1.js"></script>
+</head><body>
+<div class="row">
+  종목 <input id="code" value="005930" size="7">
+  <select id="kind"><option value="T">틱봉</option><option value="m">분봉</option></select>
+  <select id="period"></select>
+  <button id="load">조회</button><button id="more" disabled>+이전페이지</button>
+  <span id="err"></span><span id="info"></span>
+</div>
+<div class="row">
+  ST 기간 <input id="stp" class="n" value="14"> 배수 <input id="stm" class="n" value="2">
+  &nbsp;JMA 기간 <input id="jp" class="n" value="14"> phase <input id="jph" class="n" value="50">
+  power <input id="jpw" class="n" value="2">
+  <button id="apply">지표적용</button><span id="chk"></span><span id="leg"></span>
+</div>
+<div id="c"></div>
+<script>
+const L = LightweightCharts;
+const PERIODS = {T: [15, 30, 60, 120, 240, 360, 480, 720], m: [1, 3, 5, 10, 15, 30, 60]};
+const T0 = 1000000000;
+const ST_UP = "#e34a4a", ST_DN = "#3f7fd6", J_UP = "#AB47BC", J_DN = "#00C853";   // kiwoom-desk 색
+const $ = id => document.getElementById(id);
+const tm = i => T0 + i * 60, idx = time => Math.round((time - T0) / 60);
+let bars = [], ind = null, hasPrev = false, busy = false;
+
+const hm = t => String(t).padStart(4, "0").replace(/(\d\d)(\d\d)/, "$1:$2");
+const md = d => String(d).slice(4, 6) + "/" + String(d).slice(6, 8);
+
+const chart = L.createChart($("c"), {
+  autoSize: true,
+  layout: {background: {color: "#131722"}, textColor: "#d1d4dc"},
+  grid: {vertLines: {color: "#1e222d"}, horzLines: {color: "#1e222d"}},
+  timeScale: {rightOffset: 5, tickMarkFormatter: time => {
+    const i = idx(time), b = bars[i];
+    if (!b) return "";
+    return (i === 0 || bars[i - 1].date !== b.date) ? md(b.date) : hm(b.t);
+  }},
+  localization: {timeFormatter: time => {
+    const b = bars[idx(time)];
+    return b ? `${md(b.date)} ${hm(b.t)} #${b.seq} ${b.session}${b.live ? " 진행중" : ""}` : "";
+  }},
+});
+const candle = chart.addSeries(L.CandlestickSeries, {
+  upColor: ST_UP, downColor: ST_DN, borderVisible: false, wickUpColor: ST_UP, wickDownColor: ST_DN});
+const lineOpt = t => ({title: t, lineWidth: 2, priceLineVisible: false, lastValueVisible: true,
+                       crosshairMarkerVisible: false});
+const stS = chart.addSeries(L.LineSeries, lineOpt("ST"));
+const jmS = chart.addSeries(L.LineSeries, lineOpt("JMA"));
+const marks = L.createSeriesMarkers(candle, []);
+const vol = chart.addSeries(L.HistogramSeries, {priceFormat: {type: "volume"}}, 1);
+try { chart.panes()[1].setHeight(110); } catch (e) {}
+
+/* ---- 검증용: kiwoom-desk TS와 같은 계산을 브라우저에서 다시 해서 서버 값과 봉마다 비교 ---- */
+function roundEven(v, d) {
+  if (!Number.isFinite(v)) return v;
+  const f = 10 ** d, s = v * f, fl = Math.floor(s), fr = s - fl;
+  const eps = Number.EPSILON * Math.max(1, Math.abs(s)) * 4;
+  const r = Math.abs(fr - 0.5) <= eps ? (fl % 2 === 0 ? fl : fl + 1) : Math.round(s);
+  return r / f;
+}
+function trJs(b, i) {
+  const x = b[i];
+  if (i === 0) return x.h - x.l;
+  const pc = b[i - 1].c;
+  return Math.max(x.h - x.l, Math.abs(x.h - pc), Math.abs(x.l - pc));
+}
+function stJs(b, period, mult) {
+  period = Math.max(1, Math.trunc(period)); mult = Math.max(0.01, +mult);
+  const out = new Array(b.length).fill(null); let prev = null;
+  for (let i = period - 1; i < b.length; i++) {
+    const x = b[i], hl2 = (x.h + x.l) / 2; let atr;
+    if (i === period - 1) { let s = 0; for (let k = 0; k < period; k++) s += trJs(b, k); atr = s / period; }
+    else atr = (prev.atr * (period - 1) + trJs(b, i)) / period;
+    const bu = hl2 + mult * atr, bl = hl2 - mult * atr; let st;
+    if (!prev) { const up = x.c >= hl2; st = {atr, fu: bu, fl: bl, v: up ? bl : bu, up}; }
+    else {
+      const pc = b[i - 1].c;
+      const fu = (bu < prev.fu || pc > prev.fu) ? bu : prev.fu;
+      const fl = (bl > prev.fl || pc < prev.fl) ? bl : prev.fl;
+      const v = prev.v === prev.fu ? (x.c <= fu ? fu : fl) : (x.c >= fl ? fl : fu);
+      st = {atr, fu, fl, v, up: v === fl};
+    }
+    const turn = !prev ? 0 : (st.up && !prev.up ? 1 : (prev.up && !st.up ? -1 : 0));
+    out[i] = {v: +st.v.toFixed(6), up: st.up, turn}; prev = st;
+  }
+  return out;
+}
+function jmaJs(b, period, phase, power) {
+  period = Math.max(1, Math.min(10000, Math.trunc(period)));
+  phase = Math.max(-100, Math.min(100, Math.trunc(phase)));
+  power = Math.max(1, Math.min(10000, Math.trunc(power)));
+  const beta = 0.45 * (period - 1) / (0.45 * (period - 1) + 2), alpha = beta ** power;
+  let e0 = 0, e1 = 0, e2 = 0, last = 0, warm = 0, dir = 0, count = 0, init = false;
+  return b.map(x => {
+    const src = x.c;
+    if (!init) { e0 = src; e1 = 0; e2 = 0; last = src; init = true; }
+    e0 = (1 - alpha) * src + alpha * e0;
+    e1 = (src - e0) * (1 - beta) + beta * e1;
+    e2 = (e0 + (phase / 100 + 1.5) * e1 - last) * ((1 - alpha) ** 2) + (alpha ** 2) * e2;
+    count++; warm += src;
+    const cur = count <= period ? roundEven(warm / count, 4) : roundEven(e2 + last, 4);
+    if (cur > last) dir = 1; else if (cur < last) dir = -1; else if (dir === 0) dir = 1;
+    last = cur;
+    return {v: cur, dir};
+  });
+}
+function verify() {
+  if (!ind) return;
+  const p = ind.params, sub = bars.slice(ind.start);
+  const s2 = stJs(sub, p.st_period, p.st_mult), j2 = jmaJs(sub, p.jma_period, p.jma_phase, p.jma_power);
+  let n = 0, ok = 0, bad = null;
+  for (let k = 0; k < sub.length; k++) {
+    const a = ind.st[ind.start + k], b = s2[k];
+    if (a || b) {
+      n++;
+      if (a && b && Math.abs(a.v - b.v) < 1e-6 && a.up === b.up && a.turn === b.turn) ok++;
+      else bad = bad || ["ST", ind.start + k, a, b];
+    }
+    const c = ind.jma[ind.start + k], d = j2[k]; n++;
+    if (c && d && Math.abs(c.v - d.v) < 1e-6 && c.dir === d.dir) ok++;
+    else bad = bad || ["JMA", ind.start + k, c, d];
+  }
+  $("chk").textContent = `TS검증 ${ok}/${n}`;
+  $("chk").style.color = ok === n ? "#089981" : "#f23645";
+  if (bad) console.warn("첫 불일치", bad);
+}
+
+/* ---- 그리기 ---- */
+function legend(i) {
+  const b = bars[i];
+  if (!b) { $("leg").textContent = ""; return; }
+  const s = ind && ind.st[i], j = ind && ind.jma[i];
+  $("leg").innerHTML = `${md(b.date)} ${hm(b.t)} #${b.seq} C ${b.c.toLocaleString()} | ST ` +
+    (s ? `<span style="color:${s.up ? ST_UP : ST_DN}">${Math.round(s.v).toLocaleString()} ${s.up ? "상승" : "하락"}</span>` : "-") +
+    " | JMA " + (j ? `<span style="color:${j.dir > 0 ? J_UP : J_DN}">${j.v.toFixed(1)} ${j.dir > 0 ? "↑" : "↓"}</span>` : "-");
+}
+chart.subscribeCrosshairMove(p => legend(p.time === undefined ? bars.length - 1 : idx(p.time)));
+
+function draw(keepShift) {
+  const range = chart.timeScale().getVisibleLogicalRange();
+  const st = ind ? ind.st : [], jm = ind ? ind.jma : [];
+  candle.setData(bars.map((b, i) => {
+    const d = {time: tm(i), open: b.o, high: b.h, low: b.l, close: b.c};
+    if (!b.day_ok) Object.assign(d, {color: "#555", wickColor: "#555"});
+    return d;
+  }));
+  stS.setData(bars.map((b, i) => st[i] ? {time: tm(i), value: st[i].v, color: st[i].up ? ST_UP : ST_DN} : {time: tm(i)}));
+  jmS.setData(bars.map((b, i) => jm[i] ? {time: tm(i), value: jm[i].v, color: jm[i].dir > 0 ? J_UP : J_DN} : {time: tm(i)}));
+  vol.setData(bars.map((b, i) => ({time: tm(i), value: b.v,
+    color: !b.day_ok ? "#444" : (b.c >= b.o ? "rgba(227,74,74,.5)" : "rgba(63,127,214,.5)")})));
+  const mk = [], first = new Set();
+  bars.forEach((b, i) => {
+    const s = st[i];
+    if (!s || !s.turn) return;
+    const up = s.turn > 0;
+    let text = up ? "ST↑" : "ST↓";
+    if (up && b.session === "reg" && !first.has(b.date)) { first.add(b.date); text = "09시후 첫↑"; }
+    mk.push({time: tm(i), position: up ? "belowBar" : "aboveBar", color: up ? ST_UP : ST_DN,
+             shape: up ? "arrowUp" : "arrowDown", text});
+  });
+  marks.setMarkers(mk);
+  if (keepShift && range) chart.timeScale().setVisibleLogicalRange({from: range.from + keepShift, to: range.to + keepShift});
+  else if (keepShift === 0) chart.timeScale().setVisibleLogicalRange({from: Math.max(0, bars.length - 150), to: bars.length + 5});
+  legend(bars.length - 1);
+}
+
+function fillPeriods() {
+  const k = $("kind").value;
+  $("period").innerHTML = PERIODS[k].map(p => `<option>${p}</option>`).join("");
+  $("period").value = k === "T" ? "360" : "1";
+}
+
+async function fetchBars(mode) {          // mode: reset | more | apply
+  if (busy) return;
+  busy = true; $("err").textContent = ""; $("load").disabled = $("more").disabled = $("apply").disabled = true;
+  const q = new URLSearchParams({code: $("code").value.trim(), kind: $("kind").value, period: $("period").value,
+    st_period: $("stp").value, st_mult: $("stm").value,
+    jma_period: $("jp").value, jma_phase: $("jph").value, jma_power: $("jpw").value});
+  if (mode === "more") q.set("more", "true");
+  if (mode === "reset") { q.set("reset", "true"); q.set("min_ok", "300"); }
+  try {
+    const res = await fetch("/api/bars?" + q);
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.detail || res.status);
+    const r = j.result, before = bars.length;
+    bars = r.bars; ind = r.ind; hasPrev = r.has_prev;
+    draw(mode === "more" ? bars.length - before : (mode === "reset" ? 0 : null));
+    verify();
+    $("info").textContent = `${r.code} ${r.period}${r.kind === "T" ? "틱" : "분"}` +
+      (r.n > 1 ? ` (${r.base}틱x${r.n})` : "") +
+      ` | 봉 ${bars.length} / 완전봉 ${bars.filter(b => b.day_ok).length} | 페이지 ${r.pages} | ${bars.length ? md(bars[0].date) : ""}~`;
+  } catch (e) {
+    $("err").textContent = "오류: " + e.message;
+  } finally {
+    busy = false; $("load").disabled = $("apply").disabled = false; $("more").disabled = !hasPrev;
+  }
+}
+
+$("kind").onchange = fillPeriods;
+$("load").onclick = () => fetchBars("reset");
+$("more").onclick = () => fetchBars("more");
+$("apply").onclick = () => fetchBars("apply");
+$("code").onkeydown = e => { if (e.key === "Enter") fetchBars("reset"); };
+fillPeriods();
+fetchBars("reset");
+</script>
+</body></html>

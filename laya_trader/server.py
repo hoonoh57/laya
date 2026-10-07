@@ -7,7 +7,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from . import config
+from . import config, ta
 from .db import DB
 from .engine import Engine
 from .hub import Hub
@@ -46,6 +46,19 @@ async def act(coro):
 @app.get("/")
 async def index():
     return FileResponse(ROOT / "laya_trader" / "static" / "index.html")
+
+
+@app.get("/chart")
+async def chart_page():
+    return FileResponse(ROOT / "laya_trader" / "static" / "chart.html")
+
+
+@app.get("/vendor/{name}")
+async def vendor(name: str):
+    f = ROOT / "laya_trader" / "static" / "vendor" / os.path.basename(name)
+    if not f.is_file():
+        raise HTTPException(404, "not found")
+    return FileResponse(f, media_type="application/javascript")
 
 
 @app.get("/api/health")
@@ -120,12 +133,19 @@ async def mode(body: dict):
 
 @app.get("/api/bars")
 async def bars(code: str, kind: str = "T", period: int = 120, more: bool = False,
-               min_ok: int = 0, reset: bool = False):
-    """Cybos 표준봉. kind=T(틱)/m(분), more=+이전페이지, min_ok=완전봉 최소 개수, reset=최신부터"""
+               min_ok: int = 0, reset: bool = False,
+               st_period: int = 14, st_mult: float = 2.0,
+               jma_period: int = 14, jma_phase: int = 50, jma_power: int = 2):
+    """Cybos 표준봉 + 서버 계산 지표(ta.py, kiwoom-desk 포팅). 지표는 서버 계산이 원본."""
     if kind not in ("T", "m") or period < 1:
         raise HTTPException(400, "kind는 T/m, period는 1 이상")
-    return await act(engine.cybos.call("bars", timeout=120, code=code.strip(), kind=kind,
-                                       period=period, more=more, min_ok=min_ok, reset=reset))
+
+    async def _get():
+        r = await engine.cybos.call("bars", timeout=120, code=code.strip(), kind=kind,
+                                    period=period, more=more, min_ok=min_ok, reset=reset)
+        r["ind"] = ta.compute(r["bars"], st_period, st_mult, jma_period, jma_phase, jma_power)
+        return r
+    return await act(_get())
 
 
 @app.post("/api/cybos/restart")
