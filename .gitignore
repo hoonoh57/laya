@@ -1,0 +1,28 @@
+cd E:\2026\laya
+
+@"
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# 모델 체크포인트 (용량이 큼)
+models/*
+!models/.gitkeep
+*.safetensors
+*.bin
+*.pt
+
+# 개인 매매 데이터 및 로그
+data/journal/*.csv
+data/dataset/
+data/paper_orders.csv
+
+# 비밀키
+.env
+*.key
+"@ | Set-Content .gitignore -Encoding ascii
+
+# Git은 빈 폴더를 추적하지 않으므로 자리표시 파일 추가
+New-Item models\.gitkeep -ItemType File -Force | Out-Null
+New-Item data\journal\.gitkeep -ItemType File -Force | Out-Null
