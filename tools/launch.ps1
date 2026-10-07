@@ -1,5 +1,5 @@
 $root = Split-Path -Parent $PSScriptRoot
-$port = 8800
+$port = 8755
 Get-Content "$root\.env" | ForEach-Object { if ($_ -match '^\s*SERVER_PORT\s*=\s*(\d+)') { $port = [int]$matches[1] } }
 New-Item -ItemType Directory -Force "$root\logs" | Out-Null
 "==== $(Get-Date) start ====" | Add-Content "$root\logs\stdout.log"

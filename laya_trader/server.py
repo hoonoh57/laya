@@ -1,4 +1,4 @@
-﻿
+
 import contextlib
 import logging
 import os
@@ -147,6 +147,6 @@ async def ws_endpoint(ws: WebSocket):
 def run():
     global SERVER
     cfg = uvicorn.Config(app, host=config.env("SERVER_HOST", "127.0.0.1"),
-                         port=int(config.env("SERVER_PORT", "8800")), log_config=None)
+                         port=int(config.env("SERVER_PORT", "8755")), log_config=None)
     SERVER = uvicorn.Server(cfg)
     SERVER.run()

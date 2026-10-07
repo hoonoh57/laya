@@ -1,6 +1,6 @@
 param([switch]$Quiet)
 $root = Split-Path -Parent $PSScriptRoot
-$port = 8800; $bport = 8801
+$port = 8755; $bport = 8801
 if (Test-Path "$root\.env") {
   Get-Content "$root\.env" | ForEach-Object {
     if ($_ -match '^\s*SERVER_PORT\s*=\s*(\d+)') { $port = [int]$matches[1] }
