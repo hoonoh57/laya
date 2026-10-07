@@ -6,6 +6,9 @@ import ctypes, json, queue, socket, sys, threading, time, traceback
 
 import pythoncom
 import win32com.client
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from chart_std import ChartPager  # noqa: E402
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8801
 PARENT_PID = int(sys.argv[2]) if len(sys.argv) > 2 else 0
@@ -110,6 +113,7 @@ class Cybos:
         self.cp = win32com.client.Dispatch("CpUtil.CpCybos")
         self.codemgr = win32com.client.Dispatch("CpUtil.CpCodeMgr")
         self.subs = {}
+        self.pagers = {}
 
     def handle(self, method, params):
         fn = getattr(self, "m_" + method, None)
@@ -176,6 +180,25 @@ class Cybos:
                 for i in range(n)]
         rows.reverse()                               # 과거 → 최근
         return {"code": plain(code), "rows": rows}
+
+    def m_bars(self, code, kind="T", period=120, more=False, min_ok=0, reset=False):
+        """표준화 봉(chart_std). more=True: +이전페이지 1회, min_ok: 완전봉 n개까지 자동, reset: 최신부터 다시"""
+        self._need_conn()
+        key = (plain(code), kind, int(period))
+        p = None if reset else self.pagers.get(key)
+        if p is None:
+            p = ChartPager(self.cp, acode(code), kind, int(period))
+            self.pagers.pop(key, None)
+            self.pagers[key] = p
+            while len(self.pagers) > 60:
+                self.pagers.pop(next(iter(self.pagers)))
+            self._wait_limit(); p.load_page()
+        elif more and p.has_prev:
+            self._wait_limit(); p.load_page()
+        while min_ok and p.has_prev and p.pages < 40 and sum(1 for b in p.bars() if b["day_ok"]) < min_ok:
+            self._wait_limit(); p.load_page()
+        return {"code": plain(code), "kind": kind, "period": int(period), "base": p.base, "n": p.n,
+                "has_prev": p.has_prev, "pages": p.pages, "bars": p.bars()}
 
     def m_orderbook_snapshot(self, code):
         self._need_conn()

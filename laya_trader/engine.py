@@ -40,6 +40,9 @@ class Engine:
         self.account = {"equity": 0, "orderable": 0, "total_pl": 0, "holdings": [], "updated": None}
         self.eval_sem = asyncio.Semaphore(1)
         self._bal_lock = asyncio.Lock()
+        self._bal_next = 0.0
+        self._bal_pending = False
+        self._bal_err_at = -1e9
         self._last_err = {}
         self.tasks = []
 
@@ -230,18 +233,31 @@ class Engine:
                             "updated": dt.datetime.now().strftime("%H:%M:%S")}
             await self.hub.emit("account", self.account, store=False)
 
-    async def refresh_balance_safe(self):
+    async def refresh_balance_safe(self, force=False):
+        """키움 호출 최소화: 최소 간격 + 1700 오류 시 60초 정지 + 같은 오류 로그 5분 1회"""
+        now = asyncio.get_running_loop().time()
+        if self._bal_lock.locked() or (not force and now < self._bal_next):
+            self._bal_pending = True
+            return
         try:
             await self.refresh_balance()
-            self._last_err.pop("balance", None)
+            self._bal_next = now + float(self.cfg["engine"].get("balance_min_gap_sec", 5))
         except Exception as e:
-            await self.log_once("balance", f"잔고 조회 실패: {e}")
+            backoff = 60 if "1700" in str(e) else 10
+            self._bal_next = now + backoff
+            self._bal_pending = True
+            if now - self._bal_err_at > 300:
+                self._bal_err_at = now
+                await self.log(f"잔고 조회 실패({backoff}초 후 재시도, 5분간 같은 오류 생략): {e}", "error")
 
     async def _balance_loop(self):
+        """주기 조회 없음. 이벤트로 쌓인 요청만 간격을 지켜 1회 처리"""
         while True:
-            await asyncio.sleep(float(self.cfg["engine"].get("balance_interval_sec", 20)))
-            if self.kws and self.kws.connected:
-                await self.refresh_balance_safe()
+            await asyncio.sleep(1)
+            if self._bal_pending and self.kws and self.kws.connected:
+                if asyncio.get_running_loop().time() >= self._bal_next:
+                    self._bal_pending = False
+                    await self.refresh_balance_safe()
 
     def portfolio(self):
         eq = self.account["equity"]
@@ -361,10 +377,33 @@ class Engine:
                        "news_risk": round(g.p_news_risk, 3), "conviction": round(g.conviction, 2),
                        "approved": d.approved, "weight": d.weight, "reason": d.reason, "order": None}
                 if d.approved and (self.auto_trade or force_order):
-                    rec["order"] = await self._place(code, q, d.weight)
+                    block = self._order_block(manual=force_order)
+                    if block:
+                        rec["order"] = {"skipped": f"shadow: {block}"}
+                        await self._shadow_note(block)
+                    else:
+                        rec["order"] = await self._place(code, q, d.weight)
                 await self.hub.emit("decision", rec)
             except Exception as e:
                 await self.log(f"{code} 평가 실패: {e}", "error")
+
+    def _order_block(self, manual=False):
+        """주문 허용 조건. 반환: 차단 사유 또는 None (Laya 결정은 실행 권한이 아님)"""
+        now = dt.datetime.now()
+        if now.weekday() >= 5:
+            return "주말"
+        h0, h1 = self.cfg["engine"].get("trade_hours", ["09:00", "15:20"])
+        hm = now.strftime("%H:%M")
+        if not (h0 <= hm < h1):
+            return f"장 시간 아님({hm}, 허용 {h0}~{h1})"
+        if not manual and getattr(self.gate, "model", "") != "trade":
+            return "자체 체크포인트(models/laya-trade) 미로드 - 기본 모델은 평가·기록만"
+        return None
+
+    async def _shadow_note(self, reason):
+        if self._last_err.get("shadow") != reason:
+            self._last_err["shadow"] = reason
+            await self.log(f"[shadow] 주문 보류: {reason}")
 
     async def _place(self, code, q, weight):
         if not self.kiwoom:

@@ -14,3 +14,4 @@ run/
 .env
 *.key
 *.bak*
+*.bak*

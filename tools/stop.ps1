@@ -1,4 +1,4 @@
-param([switch]$Quiet)
+﻿param([switch]$Quiet)
 $root = Split-Path -Parent $PSScriptRoot
 $port = 8755; $bport = 8801
 if (Test-Path "$root\.env") {
@@ -14,7 +14,7 @@ try { Invoke-RestMethod -Method Post "http://127.0.0.1:$port/api/shutdown" -Time
 $ids = @()
 foreach ($f in 'server.pid', 'bridge.pid') {
   $p = "$root\run\$f"
-  if (Test-Path $p) { $ids += [int](Get-Content $p); Remove-Item $p -Force }
+  if (Test-Path $p) { $ids += [int](Get-Content $p); Remove-Item $p -Force -ErrorAction SilentlyContinue }
 }
 foreach ($pt in $port, $bport) {
   $ids += (Get-NetTCPConnection -LocalPort $pt -State Listen -ErrorAction SilentlyContinue).OwningProcess

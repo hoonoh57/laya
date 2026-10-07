@@ -97,7 +97,7 @@ async def order(body: dict):
 
 @app.post("/api/balance")
 async def balance():
-    return await act(engine.refresh_balance())
+    return await act(engine.refresh_balance_safe(force=True))
 
 
 @app.post("/api/auto")
