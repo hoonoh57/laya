@@ -45,6 +45,11 @@ async def act(coro):
 
 @app.get("/")
 async def index():
+    return FileResponse(ROOT / "laya_trader" / "static" / "desk.html")
+
+
+@app.get("/classic")
+async def classic():
     return FileResponse(ROOT / "laya_trader" / "static" / "index.html")
 
 
@@ -58,7 +63,7 @@ async def vendor(name: str):
     f = ROOT / "laya_trader" / "static" / "vendor" / os.path.basename(name)
     if not f.is_file():
         raise HTTPException(404, "not found")
-    return FileResponse(f, media_type="application/javascript")
+    return FileResponse(f, media_type="text/css" if f.suffix == ".css" else "application/javascript")
 
 
 @app.get("/api/health")

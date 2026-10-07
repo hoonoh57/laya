@@ -1,0 +1,398 @@
+﻿<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>Laya Desk</title>
+<link rel="stylesheet" href="/vendor/dockview-1.17.1.css">
+<style>
+html,body{margin:0;height:100%;background:#131722;color:#d1d4dc;font:12px "Malgun Gothic",sans-serif;overflow:hidden}
+#top{height:34px;display:flex;align-items:center;gap:6px;padding:0 8px;background:#1e222d;border-bottom:1px solid #2a2e39}
+.badge{padding:2px 8px;border-radius:3px;font-weight:bold}.mock{background:#1b7f4a}.real{background:#c62828}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 3px 0 8px}.on{background:#2c6}.off{background:#c33}
+button{background:#2a2e39;color:#d1d4dc;border:1px solid #363a45;border-radius:3px;padding:2px 8px;cursor:pointer}
+button.act{background:#1b7f4a}.vs{padding:3px 12px}.vs.sel{background:#2962ff;color:#fff;border-color:#2962ff}
+input,select,textarea{background:#1e222d;color:#d1d4dc;border:1px solid #363a45}
+#screens{position:absolute;top:35px;bottom:0;left:0;right:0}
+.screen{position:absolute;top:0;bottom:0;left:0;right:0;visibility:hidden}.screen.sel{visibility:visible}
+.form{height:100%;overflow:auto;padding:4px;box-sizing:border-box}
+.form table{width:100%;border-collapse:collapse}
+.form td,.form th{padding:1px 4px;border-bottom:1px solid #222631;text-align:right;white-space:nowrap}
+.form td:first-child,.form th:first-child{text-align:left}
+.form th{position:sticky;top:0;background:#131722;color:#9598a1}
+tr.click:hover{background:#2a2e39;cursor:pointer}
+.up{color:#f23645}.dn{color:#2962ff}.err{color:#f77}.muted{color:#787b86}.ok{color:#089981;font-weight:bold}
+.log div{border-bottom:1px solid #1e222d;padding:1px 0;white-space:pre-wrap}
+.bar{display:flex;gap:4px;align-items:center;margin-bottom:4px;flex-wrap:wrap}
+.col{display:flex;flex-direction:column;height:100%}.col>.bar{padding:2px 4px;margin:0}
+iframe{border:0;width:100%;flex:1;display:block}
+#sel{margin-left:10px;color:#f0b90b;font-weight:bold}
+</style>
+<script src="/vendor/dockview-1.17.1.js"></script>
+</head><body>
+<div id="top">
+  <span id="mode" class="badge">-</span><span id="st"></span>
+  <span id="vsTabs" style="margin-left:14px"></span><span id="sel"></span>
+  <span style="flex:1"></span>
+  <select id="addForm"><option value="">+ 창 추가</option></select>
+  <button id="autoBtn">자동매매</button>
+  <button id="saveL">레이아웃 저장</button><button id="resetL">현재화면 초기화</button>
+  <span id="conn" class="err"></span>
+</div>
+<div id="screens"></div>
+<script>
+const DV = window["dockview-core"];
+const $ = s => document.querySelector(s);
+const n = v => (v == null || v === "") ? "" : Number(v).toLocaleString();
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const EVMAX = 300;
+let S = {events: {}}, SEL = {code: "", name: ""}, CUR = 0, OB_CODE = "";
+const LIVE = new Set(), NAMES = {}, LASTDEC = {};
+
+async function api(p, b) {
+  const r = await fetch(p, b === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(b)});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(j.detail || ("HTTP " + r.status)); throw j; }
+  return j;
+}
+const broadcast = fn => LIVE.forEach(f => { try { fn(f); } catch (e) { console.error(e); } });
+function selectSymbol(code, name) {
+  code = String(code || "").replace(/^A/, "").trim();
+  if (!code) return;
+  SEL = {code, name: name || NAMES[code] || ""};
+  $("#sel").textContent = `▶ ${SEL.name} ${code}`;
+  broadcast(f => f.symbol && f.symbol(SEL));
+}
+const rowClick = (el, sel) => el.addEventListener("click", e => {
+  const tr = e.target.closest(sel || "tr[data-c]");
+  if (tr) selectSymbol(tr.dataset.c);
+});
+
+/* ---------- 창(폼) 목록 ---------- */
+function logForm(kinds, fmt) {
+  return el => {
+    el.classList.add("log");
+    const add = e => {
+      const div = document.createElement("div");
+      if (e.data && e.data.level === "error") div.className = "err";
+      div.textContent = `${(e.ts || "").slice(11)} ${fmt(e)}`;
+      el.prepend(div);
+      while (el.children.length > EVMAX) el.lastChild.remove();
+    };
+    const draw = () => {
+      el.innerHTML = "";
+      kinds.flatMap(k => S.events[k] || []).sort((a, b) => (a.id || 0) - (b.id || 0)).forEach(add);
+    };
+    draw();
+    return {on(k, d, e) { if (kinds.includes(k)) add(e); else if (k === "snapshot") draw(); }};
+  };
+}
+const fmtOrder = e => {
+  const d = e.data || {};
+  return e.kind === "exec"
+    ? `체결 ${d.name}(${d.code}) ${d.side} ${d.status} ${d.exec_qty}주 @${n(d.exec_price)}`
+    : `[${d.mode}] ${d.side} ${d.code} ${d.qty}주 @${d.price} 주문번호 ${d.ord_no} ${d.msg}`;
+};
+
+const FORMS = {
+  cond: {title: "조건식", make(el) {
+    el.innerHTML = `<div class="bar"><button data-a="r">새로고침</button><span class="muted">실시간 구독은 직접 선택</span></div><table></table>`;
+    el.querySelector("[data-a=r]").onclick = () => api("/api/conditions/refresh", {});
+    const tb = el.querySelector("table");
+    const draw = () => {
+      const act = new Set(S.active || []);
+      tb.innerHTML = (S.conditions || []).map(c => {
+        const on = act.has(c.seq);
+        return `<tr><td>${esc(c.seq)}. ${esc(c.name)}</td><td><button class="${on ? "act" : ""}" data-seq="${esc(c.seq)}" data-on="${on ? 1 : 0}">${on ? "실시간 해제" : "실시간 구독"}</button></td></tr>`;
+      }).join("") || `<tr><td class="muted">조건식 없음/미연결</td></tr>`;
+    };
+    tb.onclick = e => {
+      const b = e.target.closest("button[data-seq]");
+      if (b) api(`/api/conditions/${b.dataset.seq}/${b.dataset.on === "1" ? "unsubscribe" : "subscribe"}`, {});
+    };
+    draw();
+    return {on(k) { if (k === "conditions" || k === "snapshot") draw(); }};
+  }},
+
+  targets: {title: "매매대상 / 관심종목", make(el) {
+    el.innerHTML = `<div class="bar"><input data-k="w" style="flex:1" placeholder="005930,000660 ..."><button data-a="s">저장</button></div><table></table>`;
+    const inp = el.querySelector("[data-k=w]"), tb = el.querySelector("table");
+    inp.value = (S.watchlist || []).join(",");
+    el.querySelector("[data-a=s]").onclick = () => api("/api/watchlist", {codes: inp.value.split(/[\s,]+/).filter(Boolean)})
+      .then(r => inp.value = r.result.join(","));
+    const draw = () => {
+      tb.innerHTML = "<tr><th>종목</th><th>현재가</th><th>등락%</th><th>거래량</th><th>Laya p / 판단</th></tr>" +
+        (S.quotes || []).map(r => {
+          const d = LASTDEC[r.code];
+          const lay = d ? `<span class="${d.approved ? "ok" : "muted"}">${esc(d.p_entry)} ${d.approved ? "승인" : "보류"}</span>` : "";
+          return `<tr class="click" data-c="${esc(r.code)}"><td>${esc(r.name)}(${esc(r.code)})</td><td>${n(r.price)}</td>` +
+                 `<td class="${r.rate >= 0 ? "up" : "dn"}">${esc(r.rate)}</td><td>${n(r.volume)}</td><td>${lay}</td></tr>`;
+        }).join("");
+    };
+    rowClick(tb);
+    draw();
+    return {on(k) {
+      if (k === "quotes" || k === "decision") draw();
+      else if (k === "snapshot") { inp.value = (S.watchlist || []).join(","); draw(); }
+    }};
+  }},
+
+  account: {title: "계좌 / 잔고", make(el) {
+    el.innerHTML = `<div class="bar"><button data-a="b">잔고 새로고침</button><span data-k="u" class="muted"></span></div><div data-k="sum"></div><table></table>`;
+    el.querySelector("[data-a=b]").onclick = () => api("/api/balance", {});
+    const tb = el.querySelector("table");
+    const draw = () => {
+      const a = S.account || {};
+      el.querySelector("[data-k=u]").textContent = a.updated || "";
+      el.querySelector("[data-k=sum]").innerHTML = `추정자산 ${n(a.equity)} / 주문가능 ${n(a.orderable)} / 평가손익 <b class="${a.total_pl >= 0 ? "up" : "dn"}">${n(a.total_pl)}</b>`;
+      tb.innerHTML = "<tr><th>종목</th><th>수량</th><th>평균</th><th>현재</th><th>손익</th><th>%</th></tr>" +
+        (a.holdings || []).map(h => {
+          NAMES[h.code] = NAMES[h.code] || h.name;
+          return `<tr class="click" data-c="${esc(h.code)}"><td>${esc(h.name)}(${esc(h.code)})</td><td>${n(h.qty)}</td><td>${n(h.avg)}</td>` +
+                 `<td>${n(h.cur)}</td><td class="${h.pl >= 0 ? "up" : "dn"}">${n(h.pl)}</td><td>${esc(h.rate)}</td></tr>`;
+        }).join("");
+    };
+    rowClick(tb);
+    draw();
+    return {on(k) { if (k === "account" || k === "snapshot") draw(); }};
+  }},
+
+  orderbook: {title: "호가", make(el) {
+    el.innerHTML = `<div class="bar"><label><input type="checkbox" data-k="link" checked>종목연동</label><input data-k="code" size="7"><button data-a="s">구독</button></div><table></table>`;
+    const code = el.querySelector("[data-k=code]"), link = el.querySelector("[data-k=link]"), tb = el.querySelector("table");
+    code.value = S.orderbook_code || "";
+    const sub = () => { const c = code.value.trim(); if (c) { OB_CODE = c; api("/api/orderbook", {code: c}); } };
+    el.querySelector("[data-a=s]").onclick = sub;
+    const draw = d => {
+      if (!d || !d.asks) return;
+      let h = "";
+      for (let i = 9; i >= 0; i--) h += `<tr><td class="dn">${n(d.asks[i].qty)}</td><td style="text-align:center">${n(d.asks[i].price)}</td><td></td></tr>`;
+      for (let i = 0; i < 10; i++) h += `<tr><td></td><td style="text-align:center">${n(d.bids[i].price)}</td><td class="up">${n(d.bids[i].qty)}</td></tr>`;
+      const tot = (d.total_bid || 0) + (d.total_ask || 0);
+      const imb = tot ? ((d.total_bid - d.total_ask) / tot * 100).toFixed(1) : "-";
+      tb.innerHTML = `<tr><th>매도 ${n(d.total_ask)}</th><th style="text-align:center">${esc(d.code)} ${d.realtime ? "실시간" : "스냅샷"}</th><th>매수 ${n(d.total_bid)}</th></tr>` +
+        h + `<tr><td colspan="3" style="text-align:center">잔량 불균형(매수-매도) <b class="${imb >= 0 ? "up" : "dn"}">${imb}%</b></td></tr>`;
+    };
+    if (S.orderbook) draw(S.orderbook);
+    return {
+      on(k, d) { if (k === "orderbook") draw(d); },
+      symbol(s) {
+        if (!link.checked) return;
+        code.value = s.code;
+        if (s.code !== OB_CODE) sub();      // 여러 호가창이 있어도 구독은 한 번만
+      },
+    };
+  }},
+
+  chart: {title: p => `차트 ${p.period || 360}${(p.kind || "T") === "T" ? "틱" : "분"}`, make(el, p) {
+    el.style.padding = "0";
+    el.innerHTML = `<div class="col"><div class="bar"><label><input type="checkbox" data-k="link" checked>종목연동</label>` +
+                   `<span class="muted">해제하면 이 차트는 외부 종목 선택을 무시</span></div><iframe></iframe></div>`;
+    const fr = el.querySelector("iframe"), link = el.querySelector("[data-k=link]");
+    fr.src = "/chart?" + new URLSearchParams({code: SEL.code || p.code || "005930", kind: p.kind || "T", period: p.period || 360});
+    return {symbol(s) { if (link.checked && fr.contentWindow) fr.contentWindow.postMessage({type: "symbol", code: s.code}, location.origin); }};
+  }},
+
+  decision: {title: "Laya 판단", make(el) {
+    el.innerHTML = `<table><thead><tr><th>시각</th><th>종목</th><th>조건</th><th>p진입</th><th>conf</th><th>regime</th>` +
+                   `<th>뉴스위험</th><th>판단</th><th>비중</th><th>주문/shadow</th></tr></thead><tbody></tbody></table>`;
+    const tb = el.querySelector("tbody");
+    const row = e => {
+      const d = e.data || {};
+      const ord = d.order == null ? "" : (typeof d.order === "string" ? d.order : JSON.stringify(d.order));
+      return `<tr class="click" data-c="${esc(d.code)}"><td>${esc((e.ts || "").slice(11))}</td><td>${esc(d.name)}(${esc(d.code)})</td>` +
+             `<td>${esc(d.condition)}</td><td>${esc(d.p_entry)}</td><td>${esc(d.conf ?? d.entry_confidence)}</td><td>${esc(d.regime)}</td>` +
+             `<td>${esc(d.p_news_risk)}</td><td class="${d.approved ? "ok" : "muted"}">${esc(d.reason)}</td><td>${esc(d.weight)}</td>` +
+             `<td class="muted">${esc(ord)}</td></tr>`;
+    };
+    const draw = () => { tb.innerHTML = (S.events.decision || []).slice().reverse().map(row).join(""); };
+    rowClick(tb);
+    draw();
+    return {on(k, d, e) {
+      if (k === "decision") {
+        tb.insertAdjacentHTML("afterbegin", row(e));
+        while (tb.rows.length > EVMAX) tb.deleteRow(-1);
+      } else if (k === "snapshot") draw();
+    }};
+  }},
+
+  condhit: {title: "조건 편입/이탈", make: logForm(["condition_hit"], e => {
+    const d = e.data || {};
+    return `[${d.name}] ${d.type} ${d.count}건 ${(d.codes || []).join(",")}`;
+  })},
+  orders: {title: "주문 / 체결", make: logForm(["order", "exec"], fmtOrder)},
+  log: {title: "로그", make: logForm(["log"], e => (e.data || {}).msg)},
+
+  manual: {title: "수동 평가 / 주문", make(el) {
+    el.innerHTML = `<div class="bar">코드 <input data-k="code" size="7"><button data-a="ev">Laya 평가</button><button data-a="evo">평가+승인 시 주문</button></div>` +
+      `<div class="bar"><select data-k="side"><option value="buy">매수</option><option value="sell">매도</option></select>` +
+      ` 수량 <input data-k="qty" size="5"> 가격 <input data-k="price" size="8" placeholder="빈칸=시장가"><button data-a="ord">주문</button></div>`;
+    const g = k => el.querySelector(`[data-k=${k}]`);
+    g("code").value = SEL.code;
+    el.querySelector("[data-a=ev]").onclick = () => api("/api/evaluate", {code: g("code").value, order: false});
+    el.querySelector("[data-a=evo]").onclick = () => {
+      if (!S.mock && !confirm("실전 계좌입니다. 승인 시 실제 주문됩니다.")) return;
+      api("/api/evaluate", {code: g("code").value, order: true});
+    };
+    el.querySelector("[data-a=ord]").onclick = () => {
+      const b = {side: g("side").value, code: g("code").value, qty: +g("qty").value, price: g("price").value || null};
+      if (!confirm(`[${S.mock ? "모의" : "실전"}] ${b.side} ${b.code} ${b.qty}주 @${b.price || "시장가"}`)) return;
+      api("/api/order", b);
+    };
+    return {symbol(s) { g("code").value = s.code; }};
+  }},
+
+  settings: {title: "설정", make(el) {
+    el.innerHTML = `<div class="col"><div class="bar"><button data-a="s">저장</button><button data-a="m">모의/실전 전환</button>` +
+      `<button data-a="c">Cybos 재시작</button></div><textarea style="flex:1;width:100%;box-sizing:border-box;font:12px Consolas,monospace"></textarea></div>`;
+    const ta = el.querySelector("textarea");
+    const draw = () => { ta.value = JSON.stringify(S.settings || {}, null, 2); };
+    el.querySelector("[data-a=s]").onclick = () => {
+      let p; try { p = JSON.parse(ta.value); } catch (e) { return alert("JSON 형식 오류"); }
+      api("/api/settings", p);
+    };
+    el.querySelector("[data-a=m]").onclick = () => {
+      const toReal = S.mock;
+      if (toReal) {
+        if (!confirm("실전투자로 전환합니다. 이후 주문은 실계좌로 나갑니다.")) return;
+        if (prompt("확인을 위해 REAL 입력") !== "REAL") return;
+      }
+      api("/api/mode", {mock: !toReal, confirm: "REAL"});
+    };
+    el.querySelector("[data-a=c]").onclick = () => api("/api/cybos/restart", {});
+    draw();
+    return {on(k) { if (k === "snapshot") draw(); }};
+  }},
+};
+
+/* ---------- 가상화면 기본 배치 ---------- */
+const SCREENS = [
+  {name: "1 매매관제", build(add) {
+    const c = add("cond");
+    const ch = add("chart", {kind: "T", period: 360}, {referencePanel: c, direction: "right"});
+    const ob = add("orderbook", {}, {referencePanel: ch, direction: "right"});
+    add("targets", {}, {referencePanel: c, direction: "below"});
+    add("decision", {}, {referencePanel: ch, direction: "below"});
+    const ac = add("account", {}, {referencePanel: ob, direction: "below"});
+    add("orders", {}, {referencePanel: ac, direction: "within"});
+    add("log", {}, {referencePanel: ac, direction: "within"});
+  }},
+  {name: "2 차트분석", build(add) {
+    const a = add("chart", {kind: "T", period: 360});
+    const b = add("chart", {kind: "m", period: 1}, {referencePanel: a, direction: "right"});
+    const ob = add("orderbook", {}, {referencePanel: b, direction: "right"});
+    add("manual", {}, {referencePanel: ob, direction: "below"});
+    add("condhit", {}, {referencePanel: a, direction: "below"});
+  }},
+  {name: "3 Laya·설정", build(add) {
+    const d = add("decision");
+    const s = add("settings", {}, {referencePanel: d, direction: "right"});
+    add("condhit", {}, {referencePanel: s, direction: "below"});
+    add("log", {}, {referencePanel: d, direction: "below"});
+  }},
+];
+
+class Renderer {
+  constructor() { this.element = document.createElement("div"); this.element.className = "form"; }
+  init(p) {
+    const params = (p && p.params) || {};
+    const F = FORMS[params.formId];
+    if (!F) { this.element.textContent = "알 수 없는 창: " + params.formId; return; }
+    try { this.f = F.make(this.element, params) || {}; LIVE.add(this.f); }
+    catch (e) { console.error(e); this.element.innerHTML = `<div class="err">창 생성 실패: ${esc(e.message)}</div>`; }
+  }
+  dispose() { if (this.f) LIVE.delete(this.f); }
+}
+
+let SEQ = 0;
+const adder = (dv, extra) => (formId, params = {}, position) => {
+  const id = `${formId}-${Date.now().toString(36)}${++SEQ}`, F = FORMS[formId];
+  const opt = {id, component: "form", params: Object.assign({formId}, params),
+               title: typeof F.title === "function" ? F.title(params) : F.title};
+  if (position) opt.position = position;
+  dv.addPanel(Object.assign(opt, extra || {}));
+  return id;
+};
+
+const VS = [];
+let saveTimer = null;
+const saveAll = () => VS.forEach(v => { try { localStorage.setItem(v.key, JSON.stringify(v.dv.toJSON())); } catch (e) { console.warn(e); } });
+
+SCREENS.forEach((sc, i) => {
+  const host = document.createElement("div");
+  host.className = "screen dockview-theme-dark";
+  $("#screens").appendChild(host);
+  const dv = DV.createDockview(host, {createComponent: () => new Renderer(), floatingGroupBounds: "boundedWithinViewport"});
+  const key = `laya-desk.v1.screen${i + 1}`, saved = localStorage.getItem(key);
+  let ok = false;
+  if (saved) {
+    try { dv.fromJSON(JSON.parse(saved)); ok = dv.panels.length > 0; }
+    catch (e) { console.warn("레이아웃 복원 실패 → 기본 배치", e); try { dv.clear(); } catch (_) {} }
+  }
+  if (!ok) sc.build(adder(dv));
+  dv.onDidLayoutChange(() => { clearTimeout(saveTimer); saveTimer = setTimeout(saveAll, 800); });
+  VS.push({sc, host, dv, key});
+});
+
+function show(i) {
+  CUR = i;
+  VS.forEach((v, k) => v.host.classList.toggle("sel", k === i));
+  document.querySelectorAll(".vs").forEach((b, k) => b.classList.toggle("sel", k === i));
+  localStorage.setItem("laya-desk.v1.cur", i);
+}
+$("#vsTabs").innerHTML = SCREENS.map((s, i) => `<button class="vs" data-i="${i}" title="Alt+${i + 1}">${s.name}</button>`).join(" ");
+$("#vsTabs").onclick = e => { const b = e.target.closest("[data-i]"); if (b) show(+b.dataset.i); };
+document.addEventListener("keydown", e => { if (e.altKey && e.key >= "1" && e.key <= String(SCREENS.length)) { show(+e.key - 1); e.preventDefault(); } });
+show(Math.min(+(localStorage.getItem("laya-desk.v1.cur") || 0), SCREENS.length - 1));
+
+$("#addForm").innerHTML += Object.entries(FORMS).map(([k, f]) =>
+  `<option value="${k}">${typeof f.title === "function" ? "차트" : f.title}</option>`).join("");
+$("#addForm").onchange = e => {
+  const k = e.target.value; e.target.value = "";
+  if (k) adder(VS[CUR].dv, {floating: true})(k, k === "chart" ? {kind: "T", period: 360} : {});
+};
+$("#saveL").onclick = () => { saveAll(); $("#conn").textContent = ""; };
+$("#resetL").onclick = () => {
+  if (!confirm(`'${SCREENS[CUR].name}' 화면을 기본 배치로 되돌립니다.`)) return;
+  const v = VS[CUR]; localStorage.removeItem(v.key); v.dv.clear(); v.sc.build(adder(v.dv)); saveAll();
+};
+$("#autoBtn").onclick = () => {
+  const on = !S.auto_trade;
+  if (on && !S.mock && !confirm("실전 계좌 자동매매를 켭니다. 계속할까요?")) return;
+  api("/api/auto", {on}).then(() => { S.auto_trade = on; renderTop(); });
+};
+
+/* ---------- 서버 실시간 ---------- */
+function renderTop() {
+  const m = $("#mode"); m.textContent = S.mock ? "모의투자" : "실전투자"; m.className = "badge " + (S.mock ? "mock" : "real");
+  const s = S.status || {};
+  const dot = (ok, t) => `<span class="dot ${ok ? "on" : "off"}"></span>${esc(t)}`;
+  $("#st").innerHTML = dot(s.kiwoom_ws, "키움 " + (s.kiwoom_msg || "")) + dot(s.cybos_login, "Cybos " + (s.cybos_msg || "")) +
+                       dot(s.laya === "ready", "Laya " + (s.laya || ""));
+  const b = $("#autoBtn"); b.textContent = "자동매매 " + (S.auto_trade ? "ON" : "OFF"); b.className = S.auto_trade ? "act" : "";
+}
+function onEvent(ev) {
+  const k = ev.kind, d = ev.data;
+  switch (k) {
+    case "snapshot":
+      S = Object.assign({}, d); S.events = S.events || {};
+      (S.events.decision || []).forEach(e => { if (e.data && e.data.code) LASTDEC[e.data.code] = e.data; });
+      renderTop(); break;
+    case "status": S.status = d; renderTop(); break;
+    case "conditions": S.conditions = d.list; S.active = d.active; break;
+    case "account": S.account = d; break;
+    case "quotes": S.quotes = d; d.forEach(r => NAMES[r.code] = r.name); break;
+    case "orderbook": S.orderbook = d; break;
+    default:
+      (S.events[k] = S.events[k] || []).push(ev);
+      if (S.events[k].length > EVMAX) S.events[k].shift();
+      if (k === "decision" && d && d.code) LASTDEC[d.code] = d;
+      if (k === "log" && /자동매매/.test((d && d.msg) || "")) api("/api/state").then(s => { S.auto_trade = s.auto_trade; renderTop(); });
+  }
+  broadcast(f => f.on && f.on(k, d, ev));
+}
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => $("#conn").textContent = "";
+  ws.onmessage = e => onEvent(JSON.parse(e.data));
+  ws.onclose = () => { $("#conn").textContent = "서버 연결 끊김 - 재연결 중…"; setTimeout(connect, 2000); };
+}
+connect();
+</script>
+</body></html>
