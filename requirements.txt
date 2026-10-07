@@ -2,3 +2,8 @@ laya
 pandas>=2.0
 numpy
 pyyaml
+fastapi
+uvicorn
+httpx
+websockets
+python-dotenv

@@ -26,3 +26,14 @@ data/paper_orders.csv
 # Git은 빈 폴더를 추적하지 않으므로 자리표시 파일 추가
 New-Item models\.gitkeep -ItemType File -Force | Out-Null
 New-Item data\journal\.gitkeep -ItemType File -Force | Out-Null
+
+# 추가
+.env
+logs/
+run/
+data/app.db*
+
+
+logs/
+run/
+data/app.db*

@@ -1,0 +1,90 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>Laya Trader</title>
+<style>
+body{font:13px "Malgun Gothic",sans-serif;margin:0;background:#111;color:#ddd}
+header{display:flex;gap:10px;align-items:center;padding:8px 12px;background:#1d1d1d;flex-wrap:wrap}
+.badge{padding:3px 10px;border-radius:4px;font-weight:bold}.mock{background:#2b6}.real{background:#d33}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px}.on{background:#2c6}.off{background:#c33}
+main{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:8px}
+section{background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:8px;overflow:auto;max-height:420px}
+h3{margin:0 0 6px;font-size:14px}table{width:100%;border-collapse:collapse}td,th{padding:2px 4px;border-bottom:1px solid #2a2a2a;text-align:right}
+td:first-child,th:first-child{text-align:left}button{background:#333;color:#ddd;border:1px solid #555;border-radius:4px;padding:3px 8px;cursor:pointer}
+button.act{background:#264}input,textarea,select{background:#222;color:#ddd;border:1px solid #444}
+.up{color:#f55}.dn{color:#59f}.log div{border-bottom:1px solid #222;padding:2px 0;white-space:pre-wrap}.err{color:#f77}
+.wide{grid-column:span 3}#conn{color:#fa0}
+</style></head><body>
+<header>
+ <span id="mode" class="badge">-</span><span id="st"></span>
+ <button id="autoBtn" onclick="toggleAuto()">자동매매</button>
+ <button onclick="switchMode()">모의/실전 전환</button>
+ <button onclick="api('/api/cybos/restart',{})">Cybos 재시작</button>
+ <button onclick="api('/api/balance',{})">잔고 새로고침</button>
+ <span id="conn"></span>
+</header>
+<main>
+ <section><h3>조건식 <button onclick="api('/api/conditions/refresh',{})">새로고침</button></h3><table id="cond"></table></section>
+ <section><h3>계좌 <span id="acctU"></span></h3><div id="acct"></div><table id="hold"></table></section>
+ <section><h3>호가 <input id="obCode" size="7" placeholder="종목코드"><button onclick="api('/api/orderbook',{code:$('#obCode').value})">구독</button></h3><table id="ob"></table></section>
+ <section><h3>관심종목 (최대 200, MarketEye) <button onclick="saveWatch()">저장</button></h3>
+  <textarea id="watch" rows="3" style="width:98%" placeholder="005930,000660 ..."></textarea><table id="quotes"></table></section>
+ <section><h3>수동 평가 / 주문</h3>
+  코드 <input id="oCode" size="7"> <button onclick="evalCode(false)">Laya 평가</button> <button onclick="evalCode(true)">평가+승인 시 주문</button><br><br>
+  <select id="oSide"><option value="buy">매수</option><option value="sell">매도</option></select>
+  수량 <input id="oQty" size="5"> 가격 <input id="oPrice" size="8" placeholder="빈칸=시장가">
+  <button onclick="manualOrder()">주문</button></section>
+ <section><h3>설정 <button onclick="saveSettings()">저장</button></h3><textarea id="settings" rows="18" style="width:98%"></textarea></section>
+ <section><h3>Laya 판단</h3><div id="ev_decision" class="log"></div></section>
+ <section><h3>조건 편입/이탈</h3><div id="ev_condition_hit" class="log"></div></section>
+ <section><h3>주문 / 체결</h3><div id="ev_order" class="log"></div><div id="ev_exec" class="log"></div></section>
+ <section class="wide"><h3>로그</h3><div id="ev_log" class="log"></div></section>
+</main>
+<script>
+const $=s=>document.querySelector(s);let S={};
+const n=v=>v==null?'':Number(v).toLocaleString();
+async function api(p,b){const r=await fetch(p,b===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+ const j=await r.json().catch(()=>({}));if(!r.ok){alert(j.detail||('HTTP '+r.status));throw j}return j}
+function connect(){const ws=new WebSocket(`ws://${location.host}/ws`);
+ ws.onopen=()=>$('#conn').textContent='';ws.onmessage=e=>on(JSON.parse(e.data));
+ ws.onclose=()=>{$('#conn').textContent='서버 연결 끊김 - 재연결 중…';setTimeout(connect,2000)}}
+function on(ev){const d=ev.data;switch(ev.kind){
+ case'snapshot':S=d;renderAll();break;case'status':S.status=d;renderTop();break;
+ case'conditions':S.conditions=d.list;S.active=d.active;renderCond();break;
+ case'account':S.account=d;renderAcct();break;case'quotes':renderQuotes(d);break;case'orderbook':renderOB(d);break;
+ default:addEv(ev,true);if(ev.kind==='log'&&/자동매매/.test(d.msg))api('/api/state').then(s=>{S.auto_trade=s.auto_trade;renderTop()})}}
+function renderAll(){renderTop();renderCond();renderAcct();$('#watch').value=(S.watchlist||[]).join(',');$('#obCode').value=S.orderbook_code||'';
+ $('#settings').value=JSON.stringify(S.settings,null,2);for(const k in S.events){$('#ev_'+k).innerHTML='';S.events[k].forEach(e=>addEv(e,true))}}
+function renderTop(){const m=$('#mode');m.textContent=S.mock?'모의투자':'실전투자';m.className='badge '+(S.mock?'mock':'real');const s=S.status||{};
+ const dot=(ok,t)=>`<span class="dot ${ok?'on':'off'}"></span>${t} `;
+ $('#st').innerHTML=dot(s.kiwoom_ws,'키움 '+(s.kiwoom_msg||''))+dot(s.cybos_login,'Cybos '+(s.cybos_msg||''))+dot(s.laya==='ready','Laya '+s.laya);
+ const b=$('#autoBtn');b.textContent='자동매매 '+(S.auto_trade?'ON':'OFF');b.className=S.auto_trade?'act':''}
+function renderCond(){const act=new Set(S.active||[]);$('#cond').innerHTML=(S.conditions||[]).map(c=>`<tr><td>${c.seq}. ${c.name}</td><td>
+ <button class="${act.has(c.seq)?'act':''}" onclick="api('/api/conditions/${c.seq}/${act.has(c.seq)?'unsubscribe':'subscribe'}',{})">${act.has(c.seq)?'실시간 해제':'실시간 구독'}</button></td></tr>`).join('')||'<tr><td>조건식 없음/미연결</td></tr>'}
+function renderAcct(){const a=S.account||{};$('#acctU').textContent=a.updated||'';
+ $('#acct').innerHTML=`추정자산 ${n(a.equity)} / 주문가능 ${n(a.orderable)} / 평가손익 <b class="${a.total_pl>=0?'up':'dn'}">${n(a.total_pl)}</b>`;
+ $('#hold').innerHTML='<tr><th>종목</th><th>수량</th><th>평균</th><th>현재</th><th>손익</th><th>%</th></tr>'+(a.holdings||[]).map(h=>
+ `<tr><td>${h.name}(${h.code})</td><td>${n(h.qty)}</td><td>${n(h.avg)}</td><td>${n(h.cur)}</td><td class="${h.pl>=0?'up':'dn'}">${n(h.pl)}</td><td>${h.rate}</td></tr>`).join('')}
+function renderQuotes(rows){$('#quotes').innerHTML='<tr><th>종목</th><th>현재가</th><th>등락%</th><th>거래량</th></tr>'+rows.map(r=>
+ `<tr onclick="$('#oCode').value='${r.code}';$('#obCode').value='${r.code}'"><td>${r.name}(${r.code})</td><td>${n(r.price)}</td><td class="${r.rate>=0?'up':'dn'}">${r.rate}</td><td>${n(r.volume)}</td></tr>`).join('')}
+function renderOB(d){if(d.code!==$('#obCode').value&&$('#obCode').value)return;let h='';
+ for(let i=9;i>=0;i--)h+=`<tr><td class="dn">${n(d.asks[i].qty)}</td><td>${n(d.asks[i].price)}</td><td></td></tr>`;
+ for(let i=0;i<10;i++)h+=`<tr><td></td><td>${n(d.bids[i].price)}</td><td class="up">${n(d.bids[i].qty)}</td></tr>`;
+ $('#ob').innerHTML=`<tr><th>매도잔량 ${n(d.total_ask)}</th><th>${d.code} ${d.realtime?'실시간':'스냅샷'}</th><th>매수잔량 ${n(d.total_bid)}</th></tr>`+h}
+function fmt(e){const d=e.data;switch(e.kind){
+ case'decision':return `${d.name}(${d.code}) [${d.condition}] p=${d.p_entry} conf=${d.conf} ${d.regime} → ${d.reason} w=${d.weight}`+(d.order?` 주문:${JSON.stringify(d.order)}`:'');
+ case'condition_hit':return `[${d.name}] ${d.type} ${d.count}건 ${d.codes.join(',')}`;
+ case'order':return `[${d.mode}] ${d.side} ${d.code} ${d.qty}주 @${d.price} 주문번호 ${d.ord_no} ${d.msg}`;
+ case'exec':return `체결 ${d.name}(${d.code}) ${d.side} ${d.status} ${d.exec_qty}주 @${n(d.exec_price)}`;
+ default:return d.msg}}
+function addEv(e,top){const box=$('#ev_'+e.kind);if(!box)return;const div=document.createElement('div');
+ if(e.data&&e.data.level==='error')div.className='err';div.textContent=`${(e.ts||'').slice(11)} ${fmt(e)}`;
+ box.prepend(div);while(box.children.length>200)box.lastChild.remove()}
+function saveWatch(){api('/api/watchlist',{codes:$('#watch').value.split(/[\s,]+/).filter(Boolean)}).then(r=>$('#watch').value=r.result.join(','))}
+function evalCode(order){if(order&&!S.mock&&!confirm('실전 계좌입니다. 승인 시 실제 주문됩니다.'))return;api('/api/evaluate',{code:$('#oCode').value,order})}
+function manualOrder(){const b={side:$('#oSide').value,code:$('#oCode').value,qty:+$('#oQty').value,price:$('#oPrice').value||null};
+ if(!confirm(`[${S.mock?'모의':'실전'}] ${b.side} ${b.code} ${b.qty}주 @${b.price||'시장가'}`))return;api('/api/order',b)}
+function toggleAuto(){const on=!S.auto_trade;if(on&&!S.mock&&!confirm('실전 계좌 자동매매를 켭니다. 계속할까요?'))return;
+ api('/api/auto',{on}).then(()=>{S.auto_trade=on;renderTop()})}
+function switchMode(){const toReal=S.mock;if(toReal){if(!confirm('실전투자로 전환합니다. 이후 주문은 실계좌로 나갑니다.'))return;
+ if(prompt('확인을 위해 REAL 입력')!=='REAL')return}api('/api/mode',{mock:!toReal,confirm:'REAL'})}
+function saveSettings(){let p;try{p=JSON.parse($('#settings').value)}catch(e){return alert('JSON 형식 오류')}api('/api/settings',p)}
+connect();
+</script></body></html>

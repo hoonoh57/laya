@@ -1,14 +1,20 @@
-mode: paper                # paper | live
 laya:
-  model: multilingual      # 파인튜닝 모델이 있으면 자동으로 "trade" 사용
+  model: multilingual
   finetuned_dir: models/laya-trade
-  device: cuda             # GPU 없으면 cpu
+  device: cuda
   max_len: 1024
 gate:
-  min_confidence: 0.65     # 이 값 미만이면 진입 보류
-  min_entry_prob: 0.60     # '진입' 확률 하한
+  min_confidence: 0.65
+  min_entry_prob: 0.60
 risk:
-  base_weight: 0.05        # 기본 포지션 비중 (자본 대비)
+  base_weight: 0.05
   max_position_weight: 0.10
   max_open_positions: 5
   max_daily_loss_pct: 0.02
+  max_order_amount: 3000000      # 1회 주문 최대 금액(원)
+engine:
+  order_type: limit              # limit = 매도1호가 지정가 | market = 시장가
+  chart_bars: 120
+  quote_interval_sec: 3
+  balance_interval_sec: 20
+  eval_initial_hits: false       # 조건 구독 직후의 초기 목록도 평가할지 여부
