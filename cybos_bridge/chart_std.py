@@ -27,6 +27,13 @@ def session(t):
     return "after"
 
 
+def is_open(date):
+    """오늘이고 20:00(NXT 애프터 종료) 이전일 때만 진행 중 봉이 존재"""
+    lt = time.localtime()
+    today = lt.tm_year * 10000 + lt.tm_mon * 100 + lt.tm_mday
+    return date == today and lt.tm_hour * 100 + lt.tm_min < 2000
+
+
 class ChartPager:
     def __init__(self, cp, code, kind, period, exch="A", page=2000):
         self.cp, self.code, self.kind, self.period = cp, code, kind, period
@@ -103,6 +110,6 @@ class ChartPager:
                     "c": g[-1][5], "v": sum(x[6] for x in g), "amt": sum(x[7] for x in g),
                     "parts": len(g), "session": s0, "mixed": s0 != s1,
                     "day_ok": day_ok, "day_last": s == len(groups) - 1,
-                    "live": g[0][0] == last_date and s == len(groups) - 1,
+                    "live": g[0][0] == last_date and s == len(groups) - 1 and is_open(g[0][0]),
                 })
         return out
