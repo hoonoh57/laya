@@ -13,3 +13,4 @@ logs/
 run/
 .env
 *.key
+*.bak*
