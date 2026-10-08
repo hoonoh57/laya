@@ -9,6 +9,7 @@ import win32com.client
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from chart_std import ChartPager  # noqa: E402
+from tracker import Tracker  # noqa: E402
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8801
 PARENT_PID = int(sys.argv[2]) if len(sys.argv) > 2 else 0
@@ -114,6 +115,7 @@ class Cybos:
         self.codemgr = win32com.client.Dispatch("CpUtil.CpCodeMgr")
         self.subs = {}
         self.pagers = {}
+        self.tracker = Tracker(self.cp, self.codemgr, broadcast, log)
 
     def handle(self, method, params):
         fn = getattr(self, "m_" + method, None)
@@ -142,7 +144,8 @@ class Cybos:
     def m_status(self):
         return {"connected": bool(self.cp.IsConnect), "server_type": self.cp.ServerType,
                 "admin": bool(ctypes.windll.shell32.IsUserAnAdmin()),
-                "python": sys.version, "subscriptions": list(self.subs)}
+                "python": sys.version, "subscriptions": list(self.subs),
+                "tracking": list(self.tracker.items)}
 
     def m_marketeye(self, codes):
         self._need_conn()
@@ -232,7 +235,24 @@ class Cybos:
     def m_unsubscribe_all(self):
         for code in list(self.subs):
             self.m_unsubscribe_orderbook(code)
+        self.tracker.clear()
         return {"ok": True}
+
+    # ---------- 정밀 추적 (tracker.py) ----------
+    def m_track_set(self, codes, kind="T", period=360, min_ok=300):
+        # 추적 종목 전체 지정: 목록에 없는 종목은 해제, 새 종목은 초기 봉 수신 후 실시간 구독
+        self._need_conn()
+        return self.tracker.set(list(codes), kind, int(period), int(min_ok))
+
+    def m_track_status(self):
+        return self.tracker.status()
+
+    def m_track_bars(self, code):
+        return self.tracker.bars(code)
+
+    def m_track_clear(self):
+        self.tracker.clear()
+        return {"tracking": []}
 
     def m_name(self, code):
         return {"code": plain(code), "name": self.codemgr.CodeToName(acode(code))}
@@ -267,6 +287,12 @@ def main():
             except Exception as e:
                 log("error", msg.get("method"), traceback.format_exc())
                 send(conn, {"id": rid, "ok": False, "error": f"{type(e).__name__}: {e}"})
+        try:
+            cy.tracker.tick()
+        except Exception:
+            if time.time() - getattr(cy, "_terr", 0) > 10:
+                cy._terr = time.time()
+                log("tracker error", traceback.format_exc())
         if time.time() - last_check > 5:
             last_check = time.time()
             if not parent_alive():
