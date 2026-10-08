@@ -153,6 +153,19 @@ async def bars(code: str, kind: str = "T", period: int = 120, more: bool = False
     return await act(_get())
 
 
+@app.get("/api/track")
+async def track():
+    """정밀 추적 상태: 전략(서버) + 브리지 tracker"""
+    async def _get():
+        r = {"strategy": engine.strategy.snapshot()}
+        try:
+            r["bridge"] = await engine.cybos.call("track_status")
+        except Exception as e:
+            r["bridge"] = {"error": str(e)}
+        return r
+    return await act(_get())
+
+
 @app.post("/api/cybos/restart")
 async def cybos_restart():
     return await act(engine.cybos.restart())

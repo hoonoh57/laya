@@ -18,3 +18,18 @@ engine:
   quote_interval_sec: 3
   balance_interval_sec: 20
   eval_initial_hits: false       # 조건 구독 직후의 초기 목록도 평가할지 여부
+track:
+  enabled: false                 # 정밀 추적 전략 ON/OFF (UI 설정으로 변경)
+  kind: T
+  period: 360
+  min_open_pct: 2.0              # 추적/진입: 시가대비 하한(%)
+  max_open_pct: 20.0             # 추적/진입: 시가대비 상한(%)
+  track_start: "09:00"
+  track_end: "15:20"
+  entry_start: "09:00"           # 기준 진입 허용 시간대
+  entry_end: "10:30"
+  release_gap: 1.0               # 하한 - 1%p 미만이
+  release_sec: 30                # 30초 지속되면 추적 해제
+  max_n: 20
+  p_min: 0.6
+  first_only: true               # 하루 첫 정규장 상승전환만 기준 진입 후보

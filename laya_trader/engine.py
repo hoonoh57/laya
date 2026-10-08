@@ -2,11 +2,13 @@ import asyncio
 import contextlib
 import datetime as dt
 import logging
+import time
 
 import pandas as pd
 
 from . import config
 from .cybos_client import CybosBridge
+from .strategy import Strategy
 from .kiwoom import KiwoomREST, KiwoomWS, norm_code, round_tick, to_float, to_int
 from src.indicators import compute_indicators
 from src.sizing import decide_order
@@ -45,6 +47,9 @@ class Engine:
         self._bal_err_at = -1e9
         self._last_err = {}
         self.tasks = []
+        self.orderbooks = {}
+        self._laya_warm_ms = 0.0
+        self.strategy = Strategy(self)
 
     # ---------- 공통 ----------
     def _mode(self):
@@ -73,8 +78,8 @@ class Engine:
                 "conditions": self.conditions, "active": sorted(self.active),
                 "watchlist": self.watchlist, "orderbook_code": self.orderbook_code,
                 "account": self.account,
-                "settings": {k: self.cfg.get(k) for k in ("gate", "risk", "engine")},
-                "events": {k: self.db.events(k, 100) for k in ("decision", "condition_hit", "order", "exec", "log")}}
+                "settings": {k: self.cfg.get(k) for k in ("gate", "risk", "engine", "track")}, "track": self.strategy.snapshot(),
+                "events": {k: self.db.events(k, 100) for k in ("decision", "condition_hit", "order", "exec", "log", "signal", "signal_outcome")}}
 
     # ---------- 시작/종료 ----------
     async def start(self):
@@ -92,10 +97,16 @@ class Engine:
     async def _load_laya(self):
         def _make():
             from src.laya_gate import LayaGate
-            return LayaGate(self.cfg["laya"])
+            g = LayaGate(self.cfg["laya"])
+            from .laya_judge import Judge
+            t0 = time.perf_counter()
+            Judge(g)({"symbol": "warmup", "signal": "warmup"})  # 첫 판단 GPU 적재(약 7초)를 시작 시 미리
+            self._laya_warm_ms = (time.perf_counter() - t0) * 1000
+            return g
         try:
             self.gate = await asyncio.to_thread(_make)
             self.status["laya"] = "ready"
+            await self.log(f"Laya 준비 완료 (워밍업 {self._laya_warm_ms:.0f}ms)")
         except Exception as e:
             self.status["laya"] = f"error: {e}"
             log.exception("Laya load")
@@ -267,6 +278,7 @@ class Engine:
 
     # ---------- Cybos ----------
     async def _on_cybos_status(self, connected, msg):
+        self.strategy.sent = None  # 브리지 재연결/종료: 추적 목록 다시 전송 (진입 기록은 유지)
         self.status.update(cybos=connected, cybos_login=False, cybos_msg=msg)
         await self.push_status()
         if connected:
@@ -317,6 +329,12 @@ class Engine:
             await self._subscribe_ob(code)
 
     async def _on_cybos_event(self, msg):
+        ev = msg.get("event")
+        if ev in ("bar_live", "bar_close", "track_reset"):
+            await self.strategy.on_event(msg)
+            return
+        if ev == "orderbook" and (msg.get("data") or {}).get("code"):
+            self.orderbooks[msg["data"]["code"]] = msg["data"]
         if msg.get("event") == "orderbook":
             await self.hub.emit("orderbook", msg["data"], store=False)
 
@@ -328,9 +346,20 @@ class Engine:
             try:
                 r = await self.cybos.call("marketeye", codes=self.watchlist[:200])
                 await self.hub.emit("quotes", r["rows"], store=False)
+                asyncio.create_task(self._track_sync(r["rows"]))
                 self._last_err.pop("quote", None)
             except Exception as e:
                 await self.log_once("quote", f"MarketEye 실패: {e}")
+
+    async def _track_sync(self, rows):
+        try:
+            await self.strategy.sync(rows)
+            for c in list(self.strategy.sent or []):
+                if c not in self.strategy.books:
+                    await self.strategy._load(c)
+            self._last_err.pop("track", None)
+        except Exception as e:
+            await self.log_once("track", f"정밀 추적 동기화 실패: {e}")
 
     async def set_watchlist(self, codes):
         out = []
@@ -349,6 +378,8 @@ class Engine:
         if code not in self.watchlist and len(self.watchlist) < 200:
             self.watchlist.append(code)
             self.db.set("watchlist", self.watchlist)
+        if self.strategy.cfg().get("enabled"):
+            return  # 정밀 추적 전략 ON: 일봉 즉시평가 생략(GPU 동시 사용 방지)
         asyncio.create_task(self.evaluate(code, seq))
 
     async def evaluate(self, code, seq="manual", force_order=False):
@@ -436,12 +467,12 @@ class Engine:
 
     # ---------- 설정 ----------
     async def update_settings(self, patch):
-        patch = {k: v for k, v in (patch or {}).items() if k in ("gate", "risk", "engine")}
+        patch = {k: v for k, v in (patch or {}).items() if k in ("gate", "risk", "engine", "track")}
         saved = deep_merge(self.db.get("settings", {}), patch)
         self.db.set("settings", saved)
         self.cfg = deep_merge(config.load_yaml(), saved)
         await self.log("설정 저장됨")
-        return {k: self.cfg[k] for k in ("gate", "risk", "engine")}
+        return {k: self.cfg.get(k) for k in ("gate", "risk", "engine", "track")}
 
     async def set_auto(self, on):
         self.auto_trade = bool(on)
