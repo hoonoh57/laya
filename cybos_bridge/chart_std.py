@@ -1,4 +1,4 @@
-﻿"""Cybos StockChart 표준화 (32bit). 측정으로 확정된 규칙:
+"""Cybos StockChart 표준화 (32bit). 측정으로 확정된 규칙:
 - 거래소 12='A'(통합=KRX+NXT, 거래량 합계 일치 확인), 13='1'(KRX 애프터 포함)
 - 응답은 최근순 -> reverse만 사용 (hhmm 해상도라 sort 금지), 날짜별 seq 부여
 - 틱 주기 상한 120 -> 초과 주기는 base 틱봉을 '날짜별 첫 봉부터' N개씩 묶음 (Cybos 원본과 100% 일치)
@@ -48,10 +48,10 @@ class ChartPager:
         self.has_prev = True
         self.pages = 0
 
-    def _make(self):
+    def _make(self, count=None):
         ch = win32com.client.Dispatch("CpSysDib.StockChart")
         ch.SetInputValue(0, self.code); ch.SetInputValue(1, ord("2"))
-        ch.SetInputValue(4, self.page); ch.SetInputValue(5, FIELDS)
+        ch.SetInputValue(4, count or self.page); ch.SetInputValue(5, FIELDS)
         ch.SetInputValue(6, ord(self.kind)); ch.SetInputValue(7, self.base)
         ch.SetInputValue(9, ord("1"))
         ch.SetInputValue(12, ord(self.exch)); ch.SetInputValue(13, ord("1"))
@@ -75,6 +75,33 @@ class ChartPager:
         self.has_prev = bool(cnt) and bool(self.obj.Continue)
         self.pages += 1
         return cnt
+
+    def refresh(self, tail=60):
+        """최근 base봉 tail개만 다시 받아 끝부분 교체(장중 확정용).
+        완성된 base봉은 바뀌지 않으므로 '직전 완성봉 5개'가 겹치는 위치를 찾아 이어 붙인다.
+        반환: 새로 완성된 base봉 수(0 이상), -1 = 겹침 실패(호출측에서 처음부터 다시 받기)"""
+        m = 5
+        if len(self.raw) < m + 1:
+            return -1
+        key = self.raw[-(m + 1):-1]
+        for size in (tail, self.page):
+            ch = self._make(size)
+            while self.cp.GetLimitRemainCount(1) <= 0:
+                time.sleep(0.05)
+            ch.BlockRequest()
+            if ch.GetDibStatus() != 0:
+                raise RuntimeError(ch.GetDibMsg1())
+            cnt = ch.GetHeaderValue(3)
+            rows = [tuple(ch.GetDataValue(f, i) for f in range(len(FIELDS))) for i in range(cnt)]
+            rows.reverse()
+            for k in range(len(rows) - m, -1, -1):
+                if rows[k:k + m] == key:
+                    new = rows[k + m:]
+                    if not new:
+                        return 0
+                    self.raw = self.raw[:-1] + new
+                    return len(new) - 1
+        return -1
 
     def ensure(self, min_ok, max_pages=40):
         """완전한 날짜의 봉(day_ok)이 min_ok개 이상 될 때까지 이전 페이지 자동 수신"""
